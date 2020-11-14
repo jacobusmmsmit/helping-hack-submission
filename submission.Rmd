@@ -58,10 +58,10 @@ combi_test <- testing(combi_split)
 
 ```{r create XGBoost spec}
 xgb_spec <- boost_tree(
-  trees = 1000, 
-  tree_depth = tune(), min_n = tune(), 
+  trees = 100, 
+  tree_depth = 3, min_n = 10, 
   loss_reduction = tune(),                     ## first three: model complexity
-  sample_size = tune(), mtry = tune(),         ## randomness
+  sample_size = 0.5, mtry = tune(),         ## randomness
   learn_rate = tune(),                         ## step size
 ) %>% 
   set_engine("xgboost") %>% 
@@ -70,13 +70,10 @@ xgb_spec <- boost_tree(
 
 ```{r create hyperparameter hypercube}
 xgb_grid <- grid_latin_hypercube(
-  tree_depth(),
-  min_n(),
   loss_reduction(),
-  sample_size = sample_prop(),
   finalize(mtry(), combi_train),
   learn_rate(),
-  size = 50
+  size = 20
 )
 
 xgb_grid

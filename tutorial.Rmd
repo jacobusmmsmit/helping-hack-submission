@@ -147,8 +147,8 @@ anova(null,mod3)
 ## Output
 
 ```{r make predictions}
-pred <- predict(mod2, newdata = filter(combi, is.na(imd_2019)))
-predexist <- predict(mod2, newdata = filter(combi, !is.na(imd_2019)))
+pred <- predict(mod3, newdata = filter(combi, is.na(imd_2019)))
+predexist <- predict(mod3, newdata = filter(combi, !is.na(imd_2019)))
 ```
 
 ```{r}
@@ -166,12 +166,15 @@ model_caret
 ```
 
 ```{r}
+missing_data <- combi %>% filter(imd_2019 %>% is.na())
+
 mod3 %>%
-    predict(new_data = missing_data)# %>%
-    bind_cols(missing_data)  #%>%
-    select(.pred, imd_2015, lad_code, lad_name) %>%
-    rename(imd_2019 = .pred) %>%
-    select(lad_code, lad_name, imd_2015, imd_2019) %>%
+    predict.lm(newdata = missing_data) %>%
+    mutate(missing_data, prediction = .) %>%
+    select(prediction, imd_2015, lad_code) %>%
+    rename(imd_2019 = prediction) %>%
+    left_join(imd %>% select(lad_code, lad_name)) %>%
+    select(lad_code, lad_name, imd_2015, imd_2019) %>% 
     write_csv("predictions.csv")
 ```
 
