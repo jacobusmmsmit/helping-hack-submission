@@ -22,72 +22,11 @@ imd <- read_csv("data/imd.csv")
 ref <- read_csv("data/ref.csv")
 ```
 
-```{r sample datasets}
-sample_n(imd, 10)
-sample_n(ref, 10)
-```
-
-```{r change in imd}
-imd %>%
-  filter(!is.na(imd_2019)) %>%
-  mutate(imd_change = imd_2019 - imd_2015) %>%
-  ggplot(aes(x = imd_change)) +
-    geom_histogram(bins = 25, col = 'black', fill = 'lightblue') +
-    labs(x = "Change in IMD", y = "Count")
-```
-
 ```{r data aggregation}
 ref_agg <- ref %>%
   group_by(lad_code, lad_name, class, category) %>%
   # Note: 2017 Devon & Cornwall Police and Crime data is missing
   summarise(expenditure = mean(expenditure, na.rm = TRUE), .groups = 'drop')
-
-sample_n(ref_agg, 10)
-```
-
-A massive flaw is already obvious: by not including county/London boroughs/other authorities, we are not accurately reflecting spending. We will not address this issue here as this is one way you can approve your leaderboard score.
-
-```{r expenditure by category, fig.asp=2}
-ref_agg %>%
-  filter(expenditure > 0) %>%
-  ggplot(aes(x = log(expenditure))) +
-    geom_histogram(bins = 25, col = 'black', fill = 'lightblue') +
-    labs(x = "Expenditure", y = "Count") +
-    facet_wrap(~ category, ncol = 2)
-```
-
-```{r expenditure by category and class, fig.asp=0.5}
-ref_agg %>%
-  mutate(expenditure_sign = case_when(
-    near(expenditure, 0) ~ 'Zero',
-    expenditure < 0 ~ 'Negative',
-    expenditure > 0 ~ 'Postive'
-  ), class_type = case_when(
-    class %in% c('L', 'UA', 'SD') ~ 'Individual',
-    class %in% c('MD', 'SC') ~ 'Combined',
-    TRUE ~ 'Other'
-  )) %>%
-  ggplot(aes(x = category, fill = expenditure_sign)) +
-    geom_bar(aes()) +
-    labs(x = "Expenditure Category", y = "Proportion", fill = "Expenditure Sign") +
-    facet_wrap(~ class_type, scales = 'free_x') +
-    coord_flip() +
-    theme(axis.text.x = element_blank())
-```
-
-```{r correlations, fig.asp=2}
-imd %>%
-  filter(!is.na(imd_2019)) %>%
-  mutate(imd_change = imd_2019 - imd_2015) %>%
-  select(lad_code, imd_change) %>%
-  inner_join(select(ref_agg, lad_code, category, expenditure) %>%
-               filter(expenditure > 0),
-             by = 'lad_code') %>%
-  ggplot(aes(x = log(expenditure), y = imd_change)) +
-    geom_point() +
-    geom_smooth(method = 'lm', formula = y ~ x) +
-    facet_wrap(~ category, scales = 'free', ncol = 2) +
-    labs(x = "Expenditure", y = "Change in IMD")
 ```
 
 ## Modelling
@@ -99,44 +38,129 @@ ref_wide <- ref_agg %>%
   )) %>%
   spread(key = category, value = expenditure)
 
-sample_n(ref_wide, 10)
 ```
 
 ```{r combine datasets}
 combi <- imd %>%
-  select(lad_code, imd_2015, imd_2019) %>%
-  left_join(select(ref_wide, -c(lad_name, class)), by = 'lad_code')
+    left_join(select(ref_wide, -c(lad_name, class)), by = 'lad_code') %>%
+    select(-c(lad_code, lad_name)) %>%
+    na.omit()
 ```
 
-```{r build null model}
-# Null model on leaderboard
-null <- lm(imd_2019 ~ offset(imd_2015),
-          data = filter(combi, !is.na(imd_2019)))
+```{r split data}
+set.seed(123)
+combi_split <- initial_split(combi, strata = imd_2019)
+combi_train <- training(combi_split)
+combi_test <- testing(combi_split)
 ```
 
-```{r build model}
-# Baseline model on leaderboard
-mod <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
-                         paste(colnames(combi)[-(1:5)], collapse = ' + '))),
-          data = filter(combi, !is.na(imd_2019)))
+```{r create XGBoost spec}
+xgb_spec <- boost_tree(
+  trees = 1000, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
 ```
 
-```{r compare models}
-anova(null, mod)
+```{r create hyperparameter hypercube}
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), combi_train),
+  learn_rate(),
+  size = 50
+)
+
+xgb_grid
+```
+```{r create workflow}
+xgb_wf <- workflow() %>%
+  add_formula(imd_2019 ~ .) %>%
+  add_model(xgb_spec)
+
+xgb_wf
+```
+```{r create cross-validation folds}
+combi_folds <- vfold_cv(combi_train, strata = imd_2019)
+
+combi_folds
+```
+```{r}
+doParallel::registerDoParallel()
+
+set.seed(235)
+xgb_res <- tune_grid(
+  xgb_wf,
+  resamples = combi_folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+xgb_res
+```
+```{r}
+xgb_res %>%
+  collect_metrics() %>%
+  filter(.metric == "rsq") %>%
+  select(mean, mtry:sample_size) %>%
+  pivot_longer(mtry:sample_size,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "RSQ")
 ```
 
-## Output
 
-```{r make predictions}
-pred <- predict(mod, newdata = filter(combi, is.na(imd_2019)))
+```{r}
+collect_metrics(xgb_res)
 ```
 
-```{r output predictions}
-imd %>%
-  filter(is.na(imd_2019)) %>%
-  mutate(imd_2019 = pred) %>%
-  write_csv('../resources/output/tutorial.csv')
+```{r}
+show_best(xgb_res, "rsq")
+best_rsq <- select_best(xgb_res, "rmse")
+final_xgb <- finalize_workflow(
+  xgb_wf,
+  best_rsq
+)
+
+final_xgb
 ```
+```{r}
+final_res <- last_fit(final_xgb, combi_split)
+
+collect_metrics(final_res)
+```
+```{r}
+final_xgb <- xgb_spec %>% finalize_model(best_rsq)
+final_xgb %>%
+    fit(formula = imd_2019 ~ ., data = combi_train) %>%
+    predict(new_data = combi_test) %>%
+    bind_cols(testing(combi_split)) %>%
+    yardstick::metrics(imd_2019, .pred) %>%
+    mutate(.estimate = format(round(.estimate, 2), big.mark = ","))
+```
+```{r}
+xgb_model <- final_xgb %>%
+    fit(formula = imd_2019 ~ ., data = combi_train)
+```
+
+```{r}
+missing_data <- imd %>% filter(is.na(imd_2019))
+
+xgb_model %>%
+    predict(new_data = missing_data) %>%
+    bind_cols(missing_data)
+```
+
 
 ## Comments
 
