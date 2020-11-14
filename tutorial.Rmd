@@ -130,22 +130,67 @@ mod <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
           data = filter(combi, !is.na(imd_2019)))
 ```
 
+```{r build model with significant predictors}
+
+mod3 <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
+                            paste(colnames(combi)[-c(1,2,3,4,5,6,8,9,10,14)], collapse = ' + '))),
+            data = filter(combi, !is.na(imd_2019)))
+```
+
+
 ```{r compare models}
 anova(null, mod)
+anova(mod, mod3)
+anova(null,mod3)
 ```
 
 ## Output
 
 ```{r make predictions}
-pred <- predict(mod, newdata = filter(combi, is.na(imd_2019)))
+pred <- predict(mod2, newdata = filter(combi, is.na(imd_2019)))
+predexist <- predict(mod2, newdata = filter(combi, !is.na(imd_2019)))
 ```
 
+```{r}
+library(caret)
+model_formula <- formula(paste0('imd_2019 ~ offset(imd_2015) + ',
+                            paste(colnames(combi)[-c(1,2,3,4,5,6,8,9,10,14)], collapse = ' + ')))
+model_caret <- train(
+  model_formula,
+  data = filter(combi, !is.na(imd_2019)),          
+  trControl = trainControl(method = "cv", number = 10), # folds
+  method = "lm", # specifying regression model
+  na.action = na.pass)
+
+model_caret
+```
+
+```{r}
+mod3 %>%
+    predict(new_data = missing_data)# %>%
+    bind_cols(missing_data)  #%>%
+    select(.pred, imd_2015, lad_code, lad_name) %>%
+    rename(imd_2019 = .pred) %>%
+    select(lad_code, lad_name, imd_2015, imd_2019) %>%
+    write_csv("predictions.csv")
+```
+
+
+
 ```{r output predictions}
-imd %>%
+table <- (imd %>%
   filter(is.na(imd_2019)) %>%
   mutate(imd_2019 = pred) %>%
-  write_csv('../resources/output/tutorial.csv')
+  write_csv('tutorial.csv'))
 ```
+
+```{r chek rmse on existing imd_2019 data}
+imd %>% 
+    filter(!is.na(imd_2019)) %>% 
+    mutate(new=predexist) %>% 
+    rmse(imd_2019, predexist)
+```
+
 
 ## Comments
 
