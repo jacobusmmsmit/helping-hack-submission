@@ -167,6 +167,16 @@ sqrt(mean((combi_test.y - mod01_predicted)^2))
 
 ## First try to include lookup tables
 
+```{r how many small entit belong to a bigger fra entity}
+num_fra <- fra %>% select(LADCD, FRACD) %>% 
+    group_by(FRACD) %>%
+    count(LADCD) %>%
+    select(FRACD, n) %>%
+    unique()
+
+```
+
+
 ```{r}
 #joining combi with fire data
 #1. join combi with bigger districts
@@ -175,10 +185,14 @@ bigset <- fra %>%
     filter(!is.na(lad_name)) %>%
     filter(year == YEAR) %>%
     mutate(lad_code = LADCD) %>%
-    select(-YEAR, -FRACD, -LADCD)
+    left_join(num_fra, by = 'FRACD') %>%
+    mutate(expenditure = expenditure / n) %>%
+    select(-YEAR, -FRACD, -LADCD, -n)
     
 new_ref <- bind_rows(bigset, ref)
 ```
+
+
 
 ```{r do what Tim did before}
 new_ref_agg <- new_ref %>%
@@ -190,7 +204,7 @@ new_ref_wide <- new_ref_agg %>%
   mutate(category = str_remove_all(
     str_replace_all(category, ' ', '_'), '[^\\w ]+'
   )) %>%
-  spread(key = category, value = expenditure) # %>%
+  spread(key = category, value = expenditure) %>%
   select(-lad_name, -class) %>%
   group_by(lad_code) %>%
   summarize_all(sum)
@@ -204,14 +218,14 @@ new_combi <- imd %>%
 ```{r build model with significant predictors}
 
 mod4 <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
-                            paste(colnames(new_combi)[-c(1,2,3,4,5,6,8,9,10,14)], collapse = ' + '))),
+                            paste(colnames(new_combi)[c(7,11,12,14,16)], collapse = ' + '))),
             data = filter(combi, !is.na(imd_2019)))
 ```
 
 ```{r build model}
 # Baseline model on leaderboard with new combi
 mod5 <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
-                         paste(colnames(new_combi)[-(1:5)], collapse = ' + '))),
+                         paste(colnames(new_combi)[-c(1,3)], collapse = ' + '))),
           data = filter(combi, !is.na(imd_2019)))
 ```
 
@@ -246,7 +260,7 @@ model_caret
 ```{r}
 library(caret)
 model_formula <- formula(paste0('imd_2019 ~ offset(imd_2015) + ',
-                            paste(colnames(new_combi)[-(1:5)], collapse = ' + ')))
+                            paste(colnames(new_combi)[c(7,11,12,14,16)], collapse = ' + ')))
 model_caret <- train(
   model_formula,
   data = filter(new_combi, !is.na(imd_2019)),          
@@ -271,9 +285,9 @@ sqrt(sum((predict.lm(mod4, newdata = filter(new_combi, !is.na(imd_2019))[-3])-fi
 
 
 ```{r}
-missing_data <- combi %>% filter(imd_2019 %>% is.na())
+missing_data <- new_combi %>% filter(imd_2019 %>% is.na())
 
-mod3 %>%
+mod4 %>%
     predict.lm(newdata = missing_data) %>%
     mutate(missing_data, prediction = .) %>%
     select(prediction, imd_2015, lad_code) %>%
