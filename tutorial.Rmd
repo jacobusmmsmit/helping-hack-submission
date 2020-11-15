@@ -11,6 +11,8 @@ library(ggplot2)  # data visualisation
 library(readr)  # data import
 library(stringr)  # text processing
 library(tidyr)  # data transformation
+library(glmnet) 
+library(tidymodels)
 ```
 
 ```{r theming}
@@ -29,6 +31,7 @@ Data available from the [hackathon website](https://warwickdatascience.github.io
 ```{r data import, message=FALSE}
 imd <- read_csv(paste0(BASE_URL, 'imd.csv'))
 ref <- read_csv(paste0(BASE_URL, 'ref.csv'))
+fra <- read_csv("data/lad_fra_lut.csv")
 ```
 
 ```{r sample datasets}
@@ -137,6 +140,81 @@ mod3 <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
             data = filter(combi, !is.na(imd_2019)))
 ```
 
+## Model with glmnet ridge/lasso
+
+
+```{r split data}
+set.seed(42)
+combi_filter <- combi %>% filter(!is.na(imd_2019))
+combi_split <- initial_split(combi_filter, strata = imd_2019)
+combi_train <- training(combi_split)
+combi_test <- testing(combi_split)
+
+combi_train.x <- as.matrix(combi_train[,-c(1,3)])
+combi_train.y <- as.matrix(combi_train[,3])
+combi_test.x <- as.matrix(combi_test[,-c(1,3)])
+combi_test.y <- as.matrix(combi_test[,3])
+ 
+```
+
+```{r}
+mod01 <- cv.glmnet(combi_train.x,combi_train.y, type.measure="mse", 
+  alpha=0.1, family="gaussian")
+mod01_predicted <- predict(mod01, s=mod01$lambda.1se, newx = combi_test.x)
+sqrt(mean((combi_test.y - mod01_predicted)^2))
+
+```
+
+## First try to include lookup tables
+
+```{r}
+#joining combi with fire data
+#1. join combi with bigger districts
+bigset <- fra %>%
+    left_join(ref, by = c("FRACD" = "lad_code")) %>%
+    filter(!is.na(lad_name)) %>%
+    filter(year == YEAR) %>%
+    mutate(lad_code = LADCD) %>%
+    select(-YEAR, -FRACD, -LADCD)
+    
+new_ref <- bind_rows(bigset, ref)
+```
+
+```{r do what Tim did before}
+new_ref_agg <- new_ref %>%
+  group_by(lad_code, lad_name, class, category) %>%
+  # Note: 2017 Devon & Cornwall Police and Crime data is missing
+  summarise(expenditure = mean(expenditure, na.rm = TRUE), .groups = 'drop')
+
+new_ref_wide <- new_ref_agg %>%
+  mutate(category = str_remove_all(
+    str_replace_all(category, ' ', '_'), '[^\\w ]+'
+  )) %>%
+  spread(key = category, value = expenditure) # %>%
+  select(-lad_name, -class) %>%
+  group_by(lad_code) %>%
+  summarize_all(sum)
+
+new_combi <- imd %>%
+  select(lad_code, imd_2015, imd_2019) %>%
+  left_join(new_ref_wide, by = 'lad_code')
+
+```
+
+```{r build model with significant predictors}
+
+mod4 <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
+                            paste(colnames(new_combi)[-c(1,2,3,4,5,6,8,9,10,14)], collapse = ' + '))),
+            data = filter(combi, !is.na(imd_2019)))
+```
+
+```{r build model}
+# Baseline model on leaderboard with new combi
+mod5 <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
+                         paste(colnames(new_combi)[-(1:5)], collapse = ' + '))),
+          data = filter(combi, !is.na(imd_2019)))
+```
+
 
 ```{r compare models}
 anova(null, mod)
@@ -166,6 +244,33 @@ model_caret
 ```
 
 ```{r}
+library(caret)
+model_formula <- formula(paste0('imd_2019 ~ offset(imd_2015) + ',
+                            paste(colnames(new_combi)[-(1:5)], collapse = ' + ')))
+model_caret <- train(
+  model_formula,
+  data = filter(new_combi, !is.na(imd_2019)),          
+  trControl = trainControl(method = "cv", number = 10), # folds
+  method = "lm", # specifying regression model
+  na.action = na.pass)
+
+model_caret
+```
+##Checking rmse
+
+```{r}
+rmse(filter(new_combi, !is.na(imd_2019))[3], predict.lm(mod5, newdata = filter(new_combi, !is.na(imd_2019))[-3]))
+
+
+
+sqrt(sum((predict.lm(mod4, newdata = filter(new_combi, !is.na(imd_2019))[-3])-filter(new_combi, !is.na(imd_2019))[3])^2)/311)
+
+
+```
+
+
+
+```{r}
 missing_data <- combi %>% filter(imd_2019 %>% is.na())
 
 mod3 %>%
@@ -177,7 +282,6 @@ mod3 %>%
     select(lad_code, lad_name, imd_2015, imd_2019) %>% 
     write_csv("predictions.csv")
 ```
-
 
 
 ```{r output predictions}
@@ -192,6 +296,17 @@ imd %>%
     filter(!is.na(imd_2019)) %>% 
     mutate(new=predexist) %>% 
     rmse(imd_2019, predexist)
+```
+## Modelling - try with authority data
+
+```{r addig not local level}
+ref_wide <- ref_agg %>%
+  mutate(category = str_remove_all(
+    str_replace_all(category, ' ', '_'), '[^\\w ]+'
+  )) %>%
+  spread(key = category, value = expenditure)
+
+sample_n(ref_wide, 10)
 ```
 
 
