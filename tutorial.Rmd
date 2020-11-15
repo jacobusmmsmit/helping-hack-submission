@@ -13,6 +13,7 @@ library(stringr)  # text processing
 library(tidyr)  # data transformation
 library(glmnet) 
 library(tidymodels)
+library(glmnetUtils)
 ```
 
 ```{r theming}
@@ -32,6 +33,11 @@ Data available from the [hackathon website](https://warwickdatascience.github.io
 imd <- read_csv(paste0(BASE_URL, 'imd.csv'))
 ref <- read_csv(paste0(BASE_URL, 'ref.csv'))
 fra <- read_csv("data/lad_fra_lut.csv")
+pfa <- read_csv("data/lad_pfa_lut.csv")
+cty <- read_csv("data/lad_cty_lut.csv")
+ca <- read_csv("data/lad_ca_lut.csv")
+
+
 ```
 
 ```{r sample datasets}
@@ -91,8 +97,8 @@ ref_agg %>%
 imd %>%
   filter(!is.na(imd_2019)) %>%
   mutate(imd_change = imd_2019 - imd_2015) %>%
-  select(lad_code, imd_change) %>%
-  inner_join(select(ref_agg, lad_code, category, expenditure) %>%
+  dplyr::select(lad_code, imd_change) %>%
+  inner_join(dplyr::select(ref_agg, lad_code, category, expenditure) %>%
                filter(expenditure > 0),
              by = 'lad_code') %>%
   ggplot(aes(x = log(expenditure), y = imd_change)) +
@@ -116,8 +122,8 @@ sample_n(ref_wide, 10)
 
 ```{r combine datasets}
 combi <- imd %>%
-  select(lad_code, imd_2015, imd_2019) %>%
-  left_join(select(ref_wide, -c(lad_name, class)), by = 'lad_code')
+  dplyr::select(lad_code, imd_2015, imd_2019) %>%
+  left_join(dplyr::select(ref_wide, -c(lad_name, class)), by = 'lad_code')
 ```
 
 ```{r build null model}
@@ -140,38 +146,22 @@ mod3 <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
             data = filter(combi, !is.na(imd_2019)))
 ```
 
-## Model with glmnet ridge/lasso
-
-
-```{r split data}
-set.seed(42)
-combi_filter <- combi %>% filter(!is.na(imd_2019))
-combi_split <- initial_split(combi_filter, strata = imd_2019)
-combi_train <- training(combi_split)
-combi_test <- testing(combi_split)
-
-combi_train.x <- as.matrix(combi_train[,-c(1,3)])
-combi_train.y <- as.matrix(combi_train[,3])
-combi_test.x <- as.matrix(combi_test[,-c(1,3)])
-combi_test.y <- as.matrix(combi_test[,3])
- 
-```
-
-```{r}
-mod01 <- cv.glmnet(combi_train.x,combi_train.y, type.measure="mse", 
-  alpha=0.1, family="gaussian")
-mod01_predicted <- predict(mod01, s=mod01$lambda.1se, newx = combi_test.x)
-sqrt(mean((combi_test.y - mod01_predicted)^2))
-
-```
-
 ## First try to include lookup tables
 
-```{r how many small entit belong to a bigger fra entity}
-num_fra <- fra %>% select(LADCD, FRACD) %>% 
-    group_by(FRACD) %>%
+```{r -- not used how many small entit belong to a bigger fra entity}
+num_fra <- fra %>%
+    group_by(FRACD, YEAR) %>%
     count(LADCD) %>%
-    select(FRACD, n) %>%
+    dplyr::select(FRACD, YEAR, n) %>%
+    unique()
+
+```
+
+```{r -not used how many small entit belong to a bigger pfa entity}
+num_pfa <- pfa %>% dplyr::select(LADCD, PFACD) %>% 
+    group_by(PFACD) %>%
+    count(LADCD) %>%
+    dplyr::select(PFACD, n) %>%
     unique()
 
 ```
@@ -180,16 +170,35 @@ num_fra <- fra %>% select(LADCD, FRACD) %>%
 ```{r}
 #joining combi with fire data
 #1. join combi with bigger districts
-bigset <- fra %>%
+bigset_fra <- fra %>%
     left_join(ref, by = c("FRACD" = "lad_code")) %>%
+    filter(!is.na(lad_name))  %>%
+    filter(year == YEAR)  %>%
+    mutate(lad_code = LADCD) %>%
+    dplyr::select(-YEAR, -FRACD, -LADCD)
+
+bigset_pfa <- pfa %>%
+    left_join(ref, by = c("PFACD" = "lad_code")) %>%
     filter(!is.na(lad_name)) %>%
     filter(year == YEAR) %>%
     mutate(lad_code = LADCD) %>%
-    left_join(num_fra, by = 'FRACD') %>%
-    mutate(expenditure = expenditure / n) %>%
-    select(-YEAR, -FRACD, -LADCD, -n)
+    dplyr::select(-YEAR, -PFACD, -LADCD)
+
+bigset_cty <- cty %>%
+    left_join(ref, by = c("CTYCD" = "lad_code")) %>%
+    filter(!is.na(lad_name)) %>%
+    filter(year == YEAR) %>%
+    mutate(lad_code = LADCD) %>%
+    dplyr::select(-YEAR, -CTYCD, -LADCD)
+
+bigset_ca <- ca %>%
+    left_join(ref, by = c("CAUTHCD" = "lad_code")) %>%
+    filter(!is.na(lad_name)) %>%
+    filter(year == YEAR) %>%
+    mutate(lad_code = LADCD) %>%
+    dplyr::select(-YEAR, -CAUTHCD, -LADCD)
     
-new_ref <- bind_rows(bigset, ref)
+new_ref <- bind_rows(bigset_fra, ref, bigset_pfa, bigset_ca)
 ```
 
 
@@ -205,12 +214,12 @@ new_ref_wide <- new_ref_agg %>%
     str_replace_all(category, ' ', '_'), '[^\\w ]+'
   )) %>%
   spread(key = category, value = expenditure) %>%
-  select(-lad_name, -class) %>%
+  dplyr::select(-lad_name, -class) %>%
   group_by(lad_code) %>%
   summarize_all(sum)
 
 new_combi <- imd %>%
-  select(lad_code, imd_2015, imd_2019) %>%
+  dplyr::select(lad_code, imd_2015, imd_2019) %>%
   left_join(new_ref_wide, by = 'lad_code')
 
 ```
@@ -219,7 +228,7 @@ new_combi <- imd %>%
 
 mod4 <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
                             paste(colnames(new_combi)[c(7,11,12,14,16)], collapse = ' + '))),
-            data = filter(combi, !is.na(imd_2019)))
+            data = filter(new_combi, !is.na(imd_2019)))
 ```
 
 ```{r build model}
@@ -230,10 +239,115 @@ mod5 <- lm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
 ```
 
 
+```{r build model with significant predictors}
+
+mod6a <- rlm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
+                            paste(colnames(new_combi)[c(7,11,12,14,16)], collapse = ' + '))),
+            data = filter(new_combi, !is.na(imd_2019)), psi = psi.huber)
+mod6b <- rlm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
+                            paste(colnames(new_combi)[c(7,11,12,14,16)], collapse = ' + '))),
+            data = filter(new_combi, !is.na(imd_2019)), psi = psi.hampel)
+mod6c <- rlm(formula(paste0('imd_2019 ~ offset(imd_2015) + ',
+                            paste(colnames(new_combi)[c(7,11,12,14,16)], collapse = ' + '))),
+            data = filter(new_combi, !is.na(imd_2019)), psi = psi.bisquare)
+
+```
+
+```{r}
+rmse6a <- sqrt(sum((predict.lm(mod6a, newdata = filter(new_combi, !is.na(imd_2019))[-3])-filter(new_combi, !is.na(imd_2019))[3])^2)/311)
+print(paste('rmse6a: ',rmse6a ))
+
+# use this
+rmse6b <- sqrt(sum((predict.lm(mod6b, newdata = filter(new_combi, !is.na(imd_2019))[-3])-filter(new_combi, !is.na(imd_2019))[3])^2)/311)
+print(paste('rmse6b: ',rmse6b ))
+
+mod6b_formula <- formula('imd_2019 ~ offset(imd_2015) + Cultural_and_Related_Services + 
+    Highways_and_Transport + Housing_Services + Planning_and_Development_Services + 
+    Public_Health')
+
+rmse6c <- sqrt(sum((predict.lm(mod6c, newdata = filter(new_combi, !is.na(imd_2019))[-3])-filter(new_combi, !is.na(imd_2019))[3])^2)/311)
+print(paste('rmse6c: ',rmse6c ))
+```
+
+```{r}
+library(caret)
+model_formula <- formula(paste0('imd_2019 ~ offset(imd_2015) + ',
+                            paste(colnames(combi)[-c(1,2,3,4,5,6,8,9,10,14)], collapse = ' + ')))
+model_caret <- train(
+  mod6b_formula,
+  data = filter(combi, !is.na(imd_2019)),          
+  trControl = trainControl(method = "cv", number = 10), # folds
+  method = "lm", # specifying regression model
+  na.action = na.pass)
+
+model_caret
+```
+
+
 ```{r compare models}
 anova(null, mod)
 anova(mod, mod3)
 anova(null,mod3)
+anova(mod4, mod5)
+```
+
+## Model with glmnet ridge/lasso
+
+
+```{r split data}
+set.seed(42)
+combi_filter <- new_combi %>% filter(!is.na(imd_2019))
+combi_split <- initial_split(combi_filter, strata = imd_2019)
+combi_train <- training(combi_split)
+combi_test <- testing(combi_split)
+
+combi_train.x <- as.matrix(combi_train[,-c(1,3)])
+combi_train.y <- as.matrix(combi_train[,3])
+combi_test.x <- as.matrix(combi_test[,-c(1,3)])
+combi_test.y <- as.matrix(combi_test[,3])
+ 
+```
+
+```{r so far maybe our best submission}
+mod01 <- cv.glmnet(combi_train.x,combi_train.y, type.measure="mse", 
+  alpha=0.1, family="gaussian")
+mod01_predicted <- predict(mod01, s=mod01$lambda.1se, newx = combi_test.x)
+sqrt(mean((combi_test.y - mod01_predicted)^2))
+
+```
+
+```{r try cva.glmnet}
+mod02 <- cva.glmnet(combi_train.x,combi_train.y, type.measure="mse", alpha = c(0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1),
+  family="gaussian")
+mod02_predicted <- predict(mod02, s=mod02$lambda.1se, newx = combi_test.x)
+sqrt(mean((combi_test.y - mod02_predicted)^2))
+
+```
+
+
+```{r trying to get the formula}
+mod01 <- cv.glmnet(combi_train.x,combi_train.y, type.measure="mse", 
+  alpha=0.1, family="gaussian")
+
+DF2formula(mod01)
+
+mod01_predicted <- predict(mod01, s=mod01$lambda.1se, newx = combi_test.x)
+sqrt(mean((combi_test.y - mod01_predicted)^2))
+
+```
+
+
+```{r cross validation for mod01 not working}
+library(caret)
+
+model_caret <- train(
+  DF2formula(mod01),
+  data = filter(new_combi, !is.na(imd_2019)),          
+  trControl = trainControl(method = "cv", number = 10), # folds
+  method = "glmnet", # specifying regression model
+  na.action = na.pass)
+
+model_caret
 ```
 
 ## Output
@@ -277,7 +391,14 @@ rmse(filter(new_combi, !is.na(imd_2019))[3], predict.lm(mod5, newdata = filter(n
 
 
 
-sqrt(sum((predict.lm(mod4, newdata = filter(new_combi, !is.na(imd_2019))[-3])-filter(new_combi, !is.na(imd_2019))[3])^2)/311)
+rmse4 <- sqrt(sum((predict.lm(mod4, newdata = filter(new_combi, !is.na(imd_2019))[-3])-filter(new_combi, !is.na(imd_2019))[3])^2)/311)
+print(paste('rmse4: ',rmse4 ))
+```
+
+```{r}
+
+rmse6 <- sqrt(sum((predict.lm(mod6, newdata = filter(new_combi, !is.na(imd_2019))[-3])-filter(new_combi, !is.na(imd_2019))[3])^2)/311)
+print(paste('rmse6: ',rmse6 ))
 
 
 ```
@@ -290,11 +411,26 @@ missing_data <- new_combi %>% filter(imd_2019 %>% is.na())
 mod4 %>%
     predict.lm(newdata = missing_data) %>%
     mutate(missing_data, prediction = .) %>%
-    select(prediction, imd_2015, lad_code) %>%
+    dplyr::select(prediction, imd_2015, lad_code) %>%
     rename(imd_2019 = prediction) %>%
-    left_join(imd %>% select(lad_code, lad_name)) %>%
-    select(lad_code, lad_name, imd_2015, imd_2019) %>% 
+    left_join(imd %>% dplyr::select(lad_code, lad_name)) %>%
+    dplyr::select(lad_code, lad_name, imd_2015, imd_2019) %>% 
     write_csv("predictions.csv")
+```
+
+```{r prediction with new_combi and mod01}
+missing_data <- new_combi %>%
+    filter(imd_2019 %>% is.na())
+    
+
+mod01 %>%
+    predict(s=mod01$lambda.1se, newx = as.matrix(missing_data[,-c(1,3)])) %>%
+    mutate(missing_data, prediction = .) %>%
+    dplyr::select(prediction, imd_2015, lad_code) %>%
+    rename(imd_2019 = prediction) %>%
+    left_join(imd %>% dplyr::select(lad_code, lad_name)) %>%
+    dplyr::select(lad_code, lad_name, imd_2015, imd_2019) %>% 
+    write_csv("predictions2.csv")
 ```
 
 
